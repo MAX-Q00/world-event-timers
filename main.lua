@@ -14,7 +14,7 @@
 
 local PLUGIN_NAME = "World Event Timers"
 local helpers   = require("ui_helpers")
-helpers.VERSION = "0.12.12"
+helpers.VERSION = "0.12.13"
 local varClockTicks = 0
 local clock     = require("clock")
 local schedules = require("schedules")
@@ -371,8 +371,17 @@ local function defaultWidth()
     return math.floor(math.min(520, math.max(248, eventsW, rotW, titleW, buttonsW))), labW
 end
 
+-- 0.12.13: adjustable columns (shared helpers.columns): Event / Time left
+-- border and the rotation label / value border; widths persist.
+local cols, headCells, timeHandle, rotHandle = nil, nil, nil, nil
 local function sizeTimeColumn()
     local w = widest(TIME_SAMPLES) + 8
+    if cols == nil then
+        cols = helpers.columns("events", { time = { w = w, min = w, max = 220 }, rotLabel = { w = 80, min = 40, max = 260 } },
+            function() sizeTimeColumn(); if layout then pcall(layout) end end)
+    end
+    cols.defs.time.w, cols.defs.time.min = w, w
+    w = cols:get("time")
     -- 0.12.11: the bell has its own 28px column; times end at its left edge.
     COLS[2].x, COLS[2].w, COLS[2].noFit = -(H.PAD + BELL_COL + w), w, true
     COLS[2].align = ui.AlignMode.BOTTOMRIGHT
@@ -382,6 +391,8 @@ local function sizeTimeColumn()
     ROT_COLS[3].align = ui.AlignMode.BOTTOMRIGHT
     -- Rotation label column is fixed to the widest label; values take the rest.
     local _, labW = defaultWidth()
+    cols.defs.rotLabel.w = labW
+    labW = cols:get("rotLabel")
     ROT_COLS[1].w, ROT_COLS[1].pw = labW, 0.0
     ROT_COLS[2].x, ROT_COLS[2].p, ROT_COLS[2].pw = H.PAD + labW + 4, 0.0, 1.0
     ROT_COLS[2].w = -(H.PAD + labW + 4 + H.PAD + BELL_COL + w + 4)
@@ -514,7 +525,9 @@ local function buildPanel(root)
     rows, bells = {}, {}
     for _ = 1, #ALL + rotations.COUNT + 1 do rowBg(root) end
     buildAlarmRow(root)
-    helpers.tableRow(root, 2, COLS, { H.lbl("Event"), H.lbl("Time left") })
+    headCells = helpers.tableRow(root, 2, COLS, { H.lbl("Event"), H.lbl("Time left") })
+    timeHandle = cols:handle(root, "time", -1, "Drag to resize the Event / Time left columns (Settings > Column widths > Reset).")
+    rotHandle = cols:handle(root, "rotLabel", 1, "Drag to resize the rotation name column.")
     helpers.divider(root, 2)
     for idx, s in ipairs(ALL) do
         local i = idx + 2
@@ -653,12 +666,17 @@ layout = function()
     -- Event rows (hidden events take no space).
     local r = 3
     local bgY, bgSet = {}, 0
+    for ci, c in ipairs(headCells or {}) do
+        local col = COLS[ci]
+        helpers.safe(function() c:SetSize(col.w, H.ROW_HEIGHT, col.pw or 0.0, 0.0); c:SetPos(col.x or 0, H.rowY(2), col.p or 0.0, 0.0) end)
+    end
+    if timeHandle then timeHandle:place(COLS[2].x - 2, H.rowY(2), H.ROW_HEIGHT, 1.0, 0.0) end
     for _, s in ipairs(ALL) do
         local show = not isHidden(s) and (not settings.compact or compactKey == nil or s.key == compactKey)
         local y = H.rowY(r)
         for ci, c in ipairs(rows[s.key] or {}) do
             local col = COLS[ci]
-            helpers.safe(function() c.hidden = not show; c:SetPos(col.x or 0, y, col.p or 0.0, 0.0) end)
+            helpers.safe(function() c.hidden = not show; c:SetSize(col.w, H.ROW_HEIGHT, col.pw or 0.0, 0.0); c:SetPos(col.x or 0, y, col.p or 0.0, 0.0) end)
         end
         local b = bells[s.key]
         if b ~= nil then helpers.safe(function()
@@ -680,10 +698,16 @@ layout = function()
     -- 0.12.11 compact mode: only the next event; footer buttons hidden.
     helpers.safe(function() rotBtn.hidden = settings.compact == true; addBtn.hidden = settings.compact == true end)
     if settings.compact then r = r - 1 end
+    local rotOn = settings.showRot and not settings.compact
+    if rotHandle then
+        rotHandle:setHidden(not rotOn or #rotRows == 0)
+        if rotOn then rotHandle:place(ROT_COLS[2].x - 2, H.rowY(r), H.ROW_HEIGHT) end
+    end
     for _, cells in ipairs(rotRows) do
         for ci, c in ipairs(cells) do
             local col = ROT_COLS[ci]
             helpers.safe(function()
+                c:SetSize(col.w, H.ROW_HEIGHT, col.pw or 0.0, 0.0)
                 c.hidden = not settings.showRot or settings.compact == true
                 c:SetPos(col.x or 0, H.rowY(r), col.p or 0.0, 0.0)
             end)
