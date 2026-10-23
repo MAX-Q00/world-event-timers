@@ -626,6 +626,13 @@ function helpers.createWindow(name, width, height, xPct, yPct)
         win.minBtn = minBtn
         -- Close: hides panel and icon; the ribbon "Show panel" brings it back.
         local closeBtn = helpers.button(box, 0, 3, 20, 18, "X", function()
+            -- 2026-10-23 (added): a plugin with a sub-menu open can set
+            -- helpers.onCloseSub = function() ... return true end so X closes
+            -- just that sub-menu. Nil by default: no change for other plugins.
+            if helpers.onCloseSub ~= nil then
+                local okSub, used = pcall(helpers.onCloseSub)
+                if okSub and used == true then return end
+            end
             win.state.closed = true
             saveWinState()
             applyCollapsed()
@@ -1235,7 +1242,7 @@ end
   Settings section, shown under the panel content while Edit is on.
   items: { label = "Opacity", options = {"60%","82%","100%"},
            get = function() return idx end, set = function(idx) end }
-  Each row is a label plus one cycling button. Long lists page.
+  Each row is a label plus a dropdown (one-option rows stay buttons). Long lists page.
 ]]
 function helpers.newSettings(root, items, perPage)
     local S = { items = items, page = 1, perPage = perPage or 8, rows = {}, open = false }
@@ -1245,14 +1252,20 @@ function helpers.newSettings(root, items, perPage)
         row.text = helpers.textRow(root, 0, helpers.lbl(it.labelFn and it.labelFn() or it.label or ""))
         pcall(function() row.text:SetSize(-(2 * helpers.PAD + 78), helpers.ROW_HEIGHT, 1.0, 0.0) end)
         if it.options then
-            local b
-            b = helpers.button(root, 0, 0, 74, 18, it.options[it.get()] or "?", function()
-                local n = it.get() % #it.options + 1
-                it.set(n)
-                helpers.setText(b, it.options[it.get()] or "?", "label")
-                if S.onChange then S.onChange() end
-            end)
-            row.btn = b
+            if #it.options > 1 then
+                -- 2026-10-23: option lists are dropdowns, not click-to-cycle buttons
+                row.dd = helpers.dropdown(root, 0, 0, 74, 18, { options = it.options, get = it.get,
+                    set = function(n) it.set(n) end, name = "set" .. i,
+                    onChange = function() if S.onChange then S.onChange() end end })
+                row.btn = row.dd
+            else
+                local b
+                b = helpers.button(root, 0, 0, 74, 18, it.options[1] or "?", function()
+                    it.set(1)
+                    if S.onChange then S.onChange() end
+                end)
+                row.btn = b
+            end
         end
         S.rows[i] = row
     end
@@ -1285,6 +1298,7 @@ function helpers.newSettings(root, items, perPage)
     function S:place(y)
         local open = self.open
         helpers.setHidden({ divider, pageText, prevB, nextB, doneB }, not open)
+        if not open then helpers.closeDropdown() end
         local first = (self.page - 1) * self.perPage + 1
         local last = first + self.perPage - 1
         if open then
@@ -1301,7 +1315,7 @@ function helpers.newSettings(root, items, perPage)
                 if row.btn then
                     helpers.safe(function() row.btn:SetPos(-helpers.PAD - 74, y + 1, 1.0, 0.0) end)
                     -- keep the label in sync when the value changed elsewhere (panel buttons)
-                    if it.get and it.options then helpers.setText(row.btn, it.options[it.get()] or "?", "label") end
+                    if row.dd then row.dd:refresh() end
                 end
                 y = y + helpers.ROW_HEIGHT
             end
@@ -1574,6 +1588,207 @@ function helpers.stepper(parent, x, y, opt)
 end
 --- 1234567 -> "1,234,567"
 function helpers.commas(n) local s = string.format("%d", math.floor(tonumber(n) or 0)); return (s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^(-?),", "%1")) end
+--[[
+  RuneScape-style dropdown (shared widget, 2026-10-23).
+  Replaces the old click-to-cycle option buttons. A stone box with a gold
+  edge shows the current value and a down arrow; clicking it opens a list
+  just below (on the top plugin layer, so it is never clipped by the panel).
+  Click an option to pick it; click the box again or anywhere outside to
+  close. Long lists show DROPDOWN_ROWS at a time with Up/Down buttons.
+    opt = { options = { "A", "B", ... } or function() return list end,
+            get = function() return index end, set = function(index) end,
+            tip = string|function, onChange = function() end, name = "id" }
+  Returns an object with :SetPos(x, y, px, py), :refresh(), .hidden = bool,
+  :close(), .box (the clickable component) and .w.
+  Values stay indexes, so saved settings keep working.
+]]
+helpers.DROPDOWN_ROWS = 8
+local ddOpen = nil
+local DD_STONE = Vector4.new(0.17, 0.15, 0.12, 1.0)
+local DD_EDGE  = Vector4.new(150/255, 126/255, 62/255, 1.0)
+local DD_HOVER = Vector4.new(0.42, 0.33, 0.14, 1.0)
+local function ddRect(parent, col, fill)
+    local r = nil
+    pcall(function()
+        r = ui.Rectangle.new(parent)
+        r.colour = col; r.fill = fill ~= false
+        pcall(function() r.clickthrough = true end)
+    end)
+    return r
+end
+local function ddOptions(o) local L = o.opt.options; if type(L) == "function" then L = L() end; return L or {} end
+function helpers.closeDropdown()
+    local d = ddOpen
+    if d == nil then return end
+    ddOpen = nil
+    for _, c in ipairs(d.listParts or {}) do pcall(function() c:Destroy() end) end
+    d.listParts, d.rows = nil, nil
+end
+function helpers.dropdown(parent, x, y, w, h, opt)
+    h = h or helpers.BTN_H
+    if h == 18 then h = helpers.BTN_H end
+    local o = { opt = opt, w = w, h = h, x = x, y = y, px = 0, py = 0, scroll = 0 }
+    o.bg = ddRect(parent, DD_STONE, true)
+    o.edge = ddRect(parent, DD_EDGE, false)
+    pcall(function() o.edge.outlineThickness = -1 end)
+    o.text = ui.Text.new(parent)
+    pcall(function()
+        o.text.font = helpers.FONT
+        o.text:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
+        o.text.clickthrough = true
+    end)
+    helpers.shadow(o.text)
+    -- Down arrow: a small triangle of 1px rows (fonts have no arrow glyph).
+    o.arrow = {}
+    for i = 0, 3 do o.arrow[i + 1] = ddRect(parent, Vector4.new(1.0, 0.80, 0.27, 1.0), true) end
+    -- Click target over the whole box (Text receives ONCLICK, see rows elsewhere).
+    o.box = ui.Text.new(parent)
+    pcall(function() o.box.content = "" end)
+    helpers.blockClicks(o.box)
+    pcall(function()
+        o.box:Subscribe(ui.Hook.ONCLICK, "dd_" .. tostring(opt.name or ""), function()
+            pcall(helpers.raiseWindow)
+            if ddOpen == o then helpers.closeDropdown() else o:open() end
+        end)
+    end)
+    if opt.tip then helpers.setTip(o.box, opt.tip) end
+    function o:refresh()
+        local L = ddOptions(self)
+        local label = L[self.opt.get()] or "?"
+        local fit = label
+        pcall(function() fit = helpers.fitText(label, helpers.FONT, self.w - 22) end)
+        helpers.setText(self.text, helpers.val(fit))
+    end
+    function o:SetPos(nx, ny, px, py)
+        local moved = nx ~= self.x or ny ~= self.y or (px or 0) ~= self.px or (py or 0) ~= self.py
+        self.x, self.y, self.px, self.py = nx, ny, px or 0, py or 0
+        local P, Q = self.px, self.py
+        helpers.safe(function()
+            self.bg:SetPos(nx, ny, P, Q); self.bg:SetSize(self.w, self.h)
+            self.edge:SetPos(nx, ny, P, Q); self.edge:SetSize(self.w, self.h)
+            self.text:SetPos(nx + 5, ny, P, Q); self.text:SetSize(self.w - 20, self.h)
+            self.box:SetPos(nx, ny, P, Q); self.box:SetSize(self.w, self.h)
+            local ax, ay = nx + self.w - 13, ny + math.floor(self.h / 2) - 2
+            for i, r in ipairs(self.arrow) do
+                r:SetPos(ax + (i - 1), ay + (i - 1), P, Q); r:SetSize(9 - 2 * (i - 1), 1)
+            end
+        end)
+        if moved and ddOpen == self then helpers.closeDropdown() end
+    end
+    function o:parts() local t = { self.bg, self.edge, self.text, self.box }; for _, r in ipairs(self.arrow) do t[#t + 1] = r end; return t end
+    function o:close() if ddOpen == self then helpers.closeDropdown() end end
+    function o:destroy() self:close(); for _, c in ipairs(self:parts()) do pcall(function() c:Destroy() end) end end
+    function o:pick(i)
+        helpers.closeDropdown()
+        if i ~= self.opt.get() then
+            self.opt.set(i)
+            if self.opt.onChange then pcall(self.opt.onChange, i) end
+        end
+        self:refresh()
+    end
+    function o:open()
+        helpers.closeDropdown()
+        local top = helpers.ensureHoverLayer()
+        if top == nil then return end
+        local gx, gy = nil, nil
+        pcall(function() local p = self.box.xyGlobal; gx, gy = p.x, p.y end)
+        if gx == nil then return end
+        local L = ddOptions(self)
+        local n = #L
+        local vis = math.min(n, helpers.DROPDOWN_ROWS)
+        local rowH = helpers.ROW_HEIGHT
+        local listH = vis * rowH + 4
+        local sw = n > vis and 18 or 0
+        -- open upward when there is no room below
+        local sh = helpers.screenH and helpers.screenH() or nil
+        local ly = gy + self.h
+        if sh ~= nil and ly + listH > sh and gy - listH >= 0 then ly = gy - listH end
+        local cur = self.opt.get() or 1
+        if n > vis then self.scroll = math.max(0, math.min(n - vis, cur - math.ceil(vis / 2))) else self.scroll = 0 end
+        ddOpen = self
+        self.listParts, self.rows = {}, {}
+        local function keep(c) if c ~= nil then table.insert(self.listParts, c) end; return c end
+        -- full-screen catcher: a click anywhere outside the list closes it
+        pcall(function()
+            local cat = keep(ui.Text.new(top))
+            cat:SetPos(0, 0); cat:SetSize(0, 0, 1.0, 1.0); cat.content = ""
+            helpers.blockClicks(cat)
+            cat:Subscribe(ui.Hook.ONCLICK, "ddOut", function() helpers.closeDropdown() end)
+        end)
+        local bg = keep(ddRect(top, DD_STONE, true))
+        local edge = keep(ddRect(top, DD_EDGE, false))
+        helpers.safe(function()
+            bg:SetPos(gx, ly); bg:SetSize(self.w, listH)
+            edge:SetPos(gx, ly); edge:SetSize(self.w, listH); pcall(function() edge.outlineThickness = -1 end)
+        end)
+        for r = 1, vis do
+            local row = {}
+            row.hl = keep(ddRect(top, DD_HOVER, true))
+            row.t = keep(ui.Text.new(top))
+            helpers.safe(function()
+                row.hl:SetPos(gx + 2, ly + 2 + (r - 1) * rowH); row.hl:SetSize(self.w - 4 - sw, rowH); row.hl.hidden = true
+                row.t:SetPos(gx + 6, ly + 2 + (r - 1) * rowH); row.t:SetSize(self.w - 10 - sw, rowH)
+                row.t.font = helpers.FONT
+                row.t:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
+            end)
+            helpers.shadow(row.t)
+            helpers.blockClicks(row.t)
+            pcall(function()
+                row.t:Subscribe(ui.Hook.ONCLICK, "ddPick", function()
+                    local i = self.scroll + r
+                    if i >= 1 and i <= #ddOptions(self) then self:pick(i) end
+                end)
+            end)
+            self.rows[r] = row
+        end
+        if sw > 0 then
+            local function mk(label, yy, d)
+                local b = keep(helpers.button(top, gx + self.w - sw, yy, sw - 2, 18, label, function()
+                    self.scroll = math.max(0, math.min(#ddOptions(self) - vis, self.scroll + d)); self:fill()
+                end, true))
+            end
+            mk("^", ly + 2, -vis)
+            mk("v", ly + listH - 20, vis)
+        end
+        self:fill()
+    end
+    function o:fill()
+        if self.rows == nil then return end
+        local L = ddOptions(self)
+        local cur = self.opt.get()
+        for r, row in ipairs(self.rows) do
+            local i = self.scroll + r
+            local s = L[i] or ""
+            local fit = s
+            pcall(function() fit = helpers.fitText(s, helpers.FONT, self.w - 14) end)
+            helpers.setText(row.t, i == cur and helpers.gold(fit) or helpers.val(fit))
+        end
+    end
+    setmetatable(o, { __newindex = function(t, k, v)
+        if k == "hidden" then
+            rawset(t, "_hidden", v)
+            for _, c in ipairs(t:parts()) do pcall(function() c.hidden = v end) end
+            if v then t:close() end
+        else rawset(t, k, v) end
+    end, __index = function(t, k) if k == "hidden" then return rawget(t, "_hidden") end end })
+    o.x = nil
+    o:SetPos(x, y)
+    o:refresh()
+    return o
+end
+-- Hover highlight for the open list (and close it if its box went away).
+helpers.subscribe("ui_helpers", "Logic", "uiDropdown", function()
+    local d = ddOpen
+    if d == nil or d.rows == nil then return end
+    local hid = false
+    pcall(function() hid = d.box.hidden == true end)
+    if hid or helpers.offGame or helpers.isCollapsed() then helpers.closeDropdown(); return end
+    local mx, my = helpers.mouseUI()
+    for _, row in ipairs(d.rows) do
+        local on = mx ~= nil and helpers.isOver(row.t, mx, my)
+        pcall(function() row.hl.hidden = not on end)
+    end
+end)
 --- Standard footer clearance below the last row of every panel.
 helpers.FOOTER_PAD = 8
 

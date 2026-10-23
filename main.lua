@@ -14,7 +14,7 @@
 
 local PLUGIN_NAME = "World Event Timers"
 local helpers   = require("ui_helpers")
-helpers.VERSION = "0.12.11"
+helpers.VERSION = "0.12.12"
 local varClockTicks = 0
 local clock     = require("clock")
 local schedules = require("schedules")
