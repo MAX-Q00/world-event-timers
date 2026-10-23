@@ -1,0 +1,11 @@
+name: Feature request
+description: Suggest an idea for World Event Timers
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes: {label: What would you like}
+    validations: {required: true}
+  - type: textarea
+    id: why
+    attributes: {label: Why it would help}

@@ -1,0 +1,25 @@
+name: Bug report
+description: Something in World Event Timers is not working
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes: {label: Plugin version, placeholder: "0.12.11"}
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes: {label: What happened}
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes: {label: What you expected}
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes: {label: Steps to reproduce, placeholder: "1. Open the panel\n2. ..."}
+  - type: textarea
+    id: screenshot
+    attributes: {label: Screenshot, description: Drag an image here if you can}
+  - type: input
+    id: display
+    attributes: {label: Game resolution and UI scale, placeholder: "1920x1080, 100%"}
