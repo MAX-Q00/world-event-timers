@@ -1588,8 +1588,19 @@ function helpers.commonItems(onChange)
         { label = "Column widths", options = { "Reset" },
           get = function() return 1 end,
           set = function() helpers.resetColumns(); if onChange then onChange() end end },
-        { label = "Version " .. tostring(helpers.VERSION) },
-    }
+        { label = "Settings backup", options = { "Save JSON", "Log dump" },
+          get = function() return 1 end,
+          set = function(i)
+              local s, err = helpers.exportSettings()
+              if i == 1 then
+                  if s then pcall(function() PersistentDB:SetStructuredData("settings_backup_json", { json = s }) end) end
+                  helpers.log("[settings] " .. (s and ("backup saved to PersistentDB key settings_backup_json (" .. #s .. " chars)") or ("backup failed: " .. tostring(err))))
+              else
+                  local all = s and helpers.fromJSON(s)
+                  helpers.log("[settings] " .. helpers.dump(all and all.entries or err, { depth = 3 }))
+              end
+          end },
+        { label = "Version " .. tostring(helpers.VERSION) },    }
 end
 
 --- Show/hide a list of components.
@@ -2210,5 +2221,61 @@ helpers.subscribe("ui_helpers", "Logic", "uiColDrag", function()
     d.idle = d.idle + 1
     if d.idle > 10 then colDrag = nil; colSave() end
 end)
+
+--[[ 2026-10-24: vendored inspect.lua + json.lua (MIT), loaded lazily on first
+  use so nothing is added to load time or per-frame cost.
+  helpers.dump(v)       readable multi-line text of any table (inspect)
+  helpers.dumpLine(v)   the same on one line (copy boxes)
+  helpers.toJSON(v)     JSON text; tables with mixed/sparse keys are converted
+                        (keys become strings, functions/userdata become text)
+  helpers.fromJSON(s)   table or nil, err
+  helpers.exportSettings() JSON of every PersistentDB entry of this plugin ]]
+local _libI, _libJ
+local function libI() if _libI == nil then local ok, m = pcall(require, "vendor_inspect"); _libI = (ok and type(m) == "table") and m or false end return _libI end
+local function libJ() if _libJ == nil then local ok, m = pcall(require, "vendor_json"); _libJ = (ok and type(m) == "table") and m or false end return _libJ end
+function helpers.dump(v, opts)
+    local I = libI()
+    if I then local ok, s = pcall(I.inspect, v, opts or { depth = 4 }); if ok and type(s) == "string" then return s end end
+    return tostring(v)
+end
+function helpers.dumpLine(v, depth) return helpers.dump(v, { depth = depth or 3, newline = " ", indent = "" }) end
+local function jsonSafe(v, seen, depth)
+    local t = type(v)
+    if t == "number" then if v ~= v or v == math.huge or v == -math.huge then return tostring(v) end return v end
+    if t == "string" or t == "boolean" or t == "nil" then return v end
+    if t ~= "table" then return tostring(v) end
+    if seen[v] or depth > 12 then return "<cycle/deep>" end
+    seen[v] = true
+    local n, isArr = 0, true
+    for k in pairs(v) do n = n + 1; if type(k) ~= "number" or k < 1 or k % 1 ~= 0 then isArr = false end end
+    if isArr then for idx = 1, n do if v[idx] == nil then isArr = false break end end end
+    local out = {}
+    if isArr then for idx = 1, n do out[idx] = jsonSafe(v[idx], seen, depth + 1) end
+    else for k, x in pairs(v) do out[tostring(k)] = jsonSafe(x, seen, depth + 1) end end
+    seen[v] = nil
+    return out
+end
+function helpers.toJSON(v)
+    local J = libJ()
+    if not J then return nil, "json library not available" end
+    local ok, s = pcall(J.encode, v)
+    if ok then return s end
+    ok, s = pcall(J.encode, jsonSafe(v, {}, 0))
+    if ok then return s end
+    return nil, tostring(s)
+end
+function helpers.fromJSON(s)
+    local J = libJ()
+    if not J then return nil, "json library not available" end
+    if type(s) ~= "string" then return nil, "not a string" end
+    local ok, v = pcall(J.decode, s)
+    if ok then return v end
+    return nil, tostring(v)
+end
+function helpers.exportSettings()
+    local all = {}
+    pcall(function() PersistentDB:IterateEntries(function(k, v) if k ~= "settings_backup_json" then all[tostring(k)] = v end end) end)
+    return helpers.toJSON({ plugin = helpers.VERSION, entries = all })
+end
 
 return helpers
