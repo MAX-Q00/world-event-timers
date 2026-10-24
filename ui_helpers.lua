@@ -348,8 +348,7 @@ end
   window is not available yet. Callers retry until it succeeds.
 ]]
 helpers.TITLE_HEIGHT = 24
-local ICON_SIZE = 60   -- 2026-10-24: minimized icon 60px (was 44) + name strip
-local ICON_LABEL_H = 16
+local ICON_SIZE = 44   -- 2026-10-24: back to the pre-batch 44px icon (no tile/outline/label)
 local STATE_KEY = "windowState"
 
 local win = { box = nil, icon = nil, content = nil, state = nil, name = "" }
@@ -533,47 +532,37 @@ function helpers.iconDefault(name)
     local sw = 1600
     pcall(function() if win.root ~= nil and win.root.width > 200 then sw = win.root.width end end)
     local col, row = math.floor(slot / 5), slot % 5
-    return math.max(0, sw - (col + 1) * 72 - 8), 110 + row * 88
+    return math.max(0, sw - (col + 1) * 52 - 8), 110 + row * 52
 end
 function helpers.buildIcon(parent, name)
-    local W, Hh = 64, 64 + ICON_LABEL_H
+    -- 2026-10-24 revert: the pre-batch look (plain 44px icon.png sprite, no
+    -- tile, no gold outline, no name label). Kept: fixed slot, re-raise,
+    -- transparent hit area with the full-name tooltip.
+    local W, Hh = ICON_SIZE, ICON_SIZE
     local holder = ui.GroupBox.new(parent)
     pcall(function() holder.stylesheetID = id.StyleSheet.DEFAULT end)
     pcall(function() holder:SetHeaderLayout(0, 0, 0, 0, 0) end)
     pcall(function() holder.colour = Vector4.new(0, 0, 0, 0) end)
     holder:SetSize(W, Hh)
-    local function rect(x, y, w, h, r, g, b, a, filled)
-        pcall(function()
-            local rc = ui.Rectangle.new(holder)
-            rc:SetPos(x, y); rc:SetSize(w, h)
-            rc.colour = Vector4.new(r, g, b, a); rc.fill = filled
-            if not filled then rc.outlineThickness = -1 end
-            pcall(function() rc.clickthrough = true end)
-        end)
-    end
-    rect(0, 0, W, 64, 0.05, 0.04, 0.03, 0.95, true)
-    pcall(function()
+    local okSp = pcall(function()
         local res = Plugin.resources.icon
+        if res == nil then error("no resources/icon.png") end
         res:Load()
         local sp = ui.Sprite.new(holder)
-        sp:SetPos(2 + (W - 4 - ICON_SIZE) / 2, 2 + (60 - ICON_SIZE) / 2)
+        sp:SetPos(0, 0)
         sp:SetSize(ICON_SIZE, ICON_SIZE)
         sp.sprite = res
         pcall(function() sp.clickthrough = true end)
     end)
-    rect(0, 0, W, 64, 0, 0, 0, 1, false)
-    rect(1, 1, W - 2, 62, 1.0, 0.80, 0.20, 1, false)
-    rect(2, 2, W - 4, 60, 1.0, 0.80, 0.20, 1, false)
-    rect(0, 64, W, ICON_LABEL_H, 0.02, 0.02, 0.02, 0.95, true)
-    pcall(function()
-        local t = ui.Text.new(holder)
-        t:SetPos(0, 64); t:SetSize(W, ICON_LABEL_H)
-        t.font = helpers.FONT
-        t.content = helpers.col(helpers.C_GOLD, helpers.SHORT_TITLES[name] or initials(name))
-        t:AlignTo(ui.AlignMode.CENTRE, ui.AlignMode.CENTRE)
-        helpers.shadow(t)
-        pcall(function() t.clickthrough = true end)
-    end)
+    if not okSp then
+        pcall(function()
+            local b = ui.Button.new(holder)
+            b.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+            b:SetPos(0, 0); b:SetSize(ICON_SIZE, ICON_SIZE)
+            b.label = helpers.SHORT_TITLES[name] or initials(name)
+            pcall(function() b.clickthrough = true end)
+        end)
+    end
     win.iconHit = nil
     pcall(function()
         local hit = ui.Text.new(holder)
@@ -757,11 +746,7 @@ function helpers.createWindow(name, width, height, xPct, yPct)
         closeBtn:SetPos(helpers.titleBtnX(), 3)
         win.closeBtn = closeBtn
 
-        -- Collapsed icon (2026-10-24): a 64 x 80 holder with a dark tile, the
-        -- plugin's resources/icon.png at 52px, a 2px bright-gold outline, the
-        -- short name in a strip underneath, and a full-name tooltip. A
-        -- transparent Text over all of it is the drag / click hit area (a
-        -- click without movement restores the window).
+        -- Collapsed icon: plain 44px resources/icon.png (pre-batch look) in a fixed per-plugin slot; a transparent hit area carries the drag/click and the full-name tooltip (a click without movement restores the window).
         local icon = helpers.buildIcon(game_window, name)
         helpers.blockClicks(icon)   -- restore-click must not reach the game world
         if win.state.ix ~= nil then icon:SetPos(win.state.ix, win.state.iy)
