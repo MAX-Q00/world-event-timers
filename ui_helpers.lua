@@ -1465,7 +1465,13 @@ function helpers.newSettings(root, items, perPage)
     function S:place(y)
         local open = self.open
         helpers.setHidden({ divider, pageText, prevB, nextB, doneB }, not open)
-        if not open then helpers.closeDropdown() end
+        -- 2026-10-24: only close a dropdown that belongs to THIS section; a
+        -- closed settings section used to close every open dropdown on each
+        -- relayout (lists vanished ~0.5 s after opening).
+        if not open and helpers.openDropdown then
+            local d = helpers.openDropdown()
+            if d ~= nil then for _, row in ipairs(self.rows or {}) do if row.dd == d then helpers.closeDropdown() break end end end
+        end
         local first = (self.page - 1) * self.perPage + 1
         local last = first + self.perPage - 1
         if open then
@@ -1847,6 +1853,7 @@ local function ddRect(parent, col, fill)
     return r
 end
 local function ddOptions(o) local L = o.opt.options; if type(L) == "function" then L = L() end; return L or {} end
+function helpers.openDropdown() return ddOpen end
 function helpers.closeDropdown()
     local d = ddOpen
     if d == nil then return end
@@ -2005,9 +2012,10 @@ function helpers.dropdown(parent, x, y, w, h, opt)
     end
     setmetatable(o, { __newindex = function(t, k, v)
         if k == "hidden" then
+            local was = rawget(t, "_hidden") == true
             rawset(t, "_hidden", v)
             for _, c in ipairs(t:parts()) do pcall(function() c.hidden = v end) end
-            if v then t:close() end
+            if v and not was then t:close() end   -- only on a real show->hide
         else rawset(t, k, v) end
     end, __index = function(t, k) if k == "hidden" then return rawget(t, "_hidden") end end })
     o.x = nil
