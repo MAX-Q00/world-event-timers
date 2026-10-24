@@ -1120,6 +1120,7 @@ end
 helpers.TIP_WRAP = 260     -- fixed tooltip wrap width (px)
 helpers.TIP_LINE_H = 16    -- tooltip line height (px)
 local hov = { cand = nil, candN = 0, miss = 0, mx = nil, my = nil, shown = false }
+local hoverLines = {}   -- pooled tooltip line Texts (one per line)
 local function hideHover()
     hoverFor = nil; hov.shown = false; hov.cand = nil; hov.candN = 0
     if hoverBox ~= nil then pcall(function() hoverBox.hidden = true end) end
@@ -1212,6 +1213,8 @@ local function areaOf(c)
     return (tonumber(w) or 1e9) * (tonumber(h) or 1e9)
 end
 function helpers.tickHover()
+    -- 2026-10-24: no tooltip while a dropdown list is open (it drew over the list)
+    if helpers.openDropdown and helpers.openDropdown() ~= nil then if hov.shown or hoverFor ~= nil then hideHover() end; return end
     local mx, my = mousePos()
     if mx == nil then hideHover(); hov.shown = false; return end
     local sc = uiScale()
@@ -1304,11 +1307,37 @@ function helpers.tickHover()
             for _, l in ipairs(lines) do maxW = math.max(maxW, tw(l)) end
             local bw = math.floor(math.min(maxW, WRAP)) + 2 * PADX + 2
             local bh = LH * math.max(1, #lines) + 2 * PADY
-            hoverText.font = helpers.FONT
-            pcall(function() hoverText.maxLines = 0 end)
-            hoverText.content = table.concat(lines, "<br>")
+            -- 2026-10-24: one Text per line at a fixed row (no <br>, no
+            -- engine re-wrap), so lines can never overlap or reflow when the
+            -- engine's measurement differs slightly from ours. Lines are
+            -- pooled: created once, reused, extra ones hidden.
+            bw = bw + 8
             hoverBox:SetSize(bw, bh)
-            pcall(function() hoverText:SetPos(PADX, PADY); hoverText:SetSize(bw - 2 * PADX, bh - 2 * PADY) end)
+            pcall(function() hoverText.content = ""; hoverText.hidden = true end)
+            for i = 1, math.max(#lines, #hoverLines) do
+                local ln = hoverLines[i]
+                if ln == nil and i <= #lines then
+                    pcall(function()
+                        ln = ui.Text.new(hoverBox)
+                        ln:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
+                        pcall(function() ln.clickthrough = true end)
+                        helpers.shadow(ln)
+                    end)
+                    hoverLines[i] = ln
+                end
+                if ln ~= nil then
+                    pcall(function()
+                        if i <= #lines then
+                            ln.font = helpers.FONT
+                            pcall(function() ln.maxLines = 1 end)
+                            ln.content = lines[i]
+                            ln:SetPos(PADX, PADY + (i - 1) * LH)
+                            ln:SetSize(bw - 2 * PADX + 40, LH)
+                            ln.hidden = false
+                        else ln.hidden = true end
+                    end)
+                end
+            end
             hov.bw, hov.bh = bw, bh   -- cached size; reused until the text changes
         end
         local moved = hov.mx == nil or math.abs(mx - hov.mx) > 2 or math.abs(my - hov.my) > 2
@@ -1341,6 +1370,7 @@ end
 function helpers.destroyHover()
     if hoverBox ~= nil then pcall(function() hoverBox:Destroy() end) end
     hoverBox, hoverText, hoverFor = nil, nil, nil
+    hoverLines = {}
 end
 
 function helpers.updateTitle()
