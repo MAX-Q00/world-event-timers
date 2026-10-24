@@ -1492,6 +1492,11 @@ end
 
 --- Destroy the window and icon (called from PluginShutdown).
 function helpers.destroyWindow()
+    -- 2026-10-23 shutdown audit: also close an open dropdown (list + full-screen
+    -- catcher) and the toast, and drop every helpers.subscribe subscription.
+    -- Every plugin calls this last in PluginShutdown, so all get the cleanup.
+    pcall(function() if helpers.closeDropdown then helpers.closeDropdown() end end)
+    pcall(function() if helpers.destroyToast then helpers.destroyToast() end end)
     helpers.destroyHover()
     if win.box ~= nil or win.icon ~= nil then
         if win.box ~= nil and win.box.x ~= nil and win.state ~= nil then
@@ -1502,10 +1507,17 @@ function helpers.destroyWindow()
     if win.box ~= nil then helpers.safe(function() win.box:Destroy() end) end
     if win.icon ~= nil then helpers.safe(function() win.icon:Destroy() end) end
     win.box, win.icon, win.content = nil, nil, nil
+    helpers.unsubscribeAll()
 end
 
 --- Subscribe to an Event.<eventName> inside pcall, printing any failure.
+helpers.subs = {}   -- { event, ref } for every helpers.subscribe (unsubscribed at shutdown)
+function helpers.unsubscribeAll()
+    for _, s in ipairs(helpers.subs) do pcall(function() Event[s[1]].Unsubscribe(s[2]) end) end
+    helpers.subs = {}
+end
 function helpers.subscribe(pluginName, eventName, refName, fn)
+    helpers.subs[#helpers.subs + 1] = { eventName, refName }
     local ok, err = pcall(function()
         Event[eventName].Subscribe(refName, function(...)
             local okCb, errCb = pcall(fn, ...)
