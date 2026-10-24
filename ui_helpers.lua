@@ -389,7 +389,7 @@ local function makeDraggable(handle, target, onEnd, resize)
                  ow = target.width, oh = target.height, resize = resize,
                  moved = false, idle = 0, onEnd = onEnd }
         pcall(function() target:MoveToFront() end)
-        if helpers.afterRaise then pcall(helpers.afterRaise) end
+        if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
     end)
     handle:Subscribe(ui.Hook.ONHOLD, "dragHold", function()
         if drag ~= nil then drag.idle = 0 end
@@ -439,22 +439,43 @@ local function tickDrag()
     if drag.moved then
         local nx, ny = math.max(0, drag.ox + dx), math.max(0, drag.oy + dy)
         if drag.resize then
-            local nw = math.max(drag.resize.minW, helpers.minContentW or 0, drag.ow + dx)
-            -- 0.11.12: a free-height panel (Gear grid) lets the user drag
-            -- the height below the current content; the plugin reflows to it.
-            local minCH = helpers.freeHeight and (helpers.minFreeH or 0) or (helpers.minContentH or 0)
-            local nh = math.max(drag.resize.minH, minCH, drag.oh + dy)
-            nw = math.max(helpers.minGripW or drag.resize.minW, helpers.minContentW or 0, drag.ow + dx)
-            pcall(function() drag.target:SetSize(math.floor(nw), math.floor(nh)) end)
-            helpers.updateTitle()
+            -- 0.1.8 resize fix: min = the plugin's content minimum (or the
+            -- grip minimum), max = what fits on screen from the panel's
+            -- position (never below the min). Height follows the mouse only
+            -- for free-height panels; content-fit panels keep their fitted
+            -- height during the drag, so the layout's fitHeight and the drag
+            -- no longer fight every frame (that was the snap-back flicker).
+            local minW = math.max(helpers.minGripW or drag.resize.minW, helpers.minContentW or 0)
+            local sw, sh = nil, nil
+            pcall(function() sw = win.root.width; sh = win.root.height end)
+            local maxW = (type(sw) == "number" and sw > 0) and math.max(minW, sw - drag.ox - 2) or 4000
+            local nw = math.min(maxW, math.max(minW, drag.ow + dx))
+            local nh
+            if helpers.freeHeight then
+                local minH = math.max(drag.resize.minH, helpers.minFreeH or 0)
+                local maxH = (type(sh) == "number" and sh > 0) and math.max(minH, sh - drag.oy - 2) or 4000
+                nh = math.min(maxH, math.max(minH, drag.oh + dy))
+            else
+                nh = drag.target.height
+            end
+            if drag.lastW ~= math.floor(nw) or drag.lastH ~= math.floor(nh) then
+                drag.lastW, drag.lastH = math.floor(nw), math.floor(nh)
+                pcall(function() drag.target:SetSize(drag.lastW, drag.lastH) end)
+                helpers.updateTitle()
+            end
         else
             pcall(function() drag.target:SetPos(math.floor(nx), math.floor(ny)) end)
         end
     end
-    -- Safety net: if the release happened off the handle, stop after the
-    -- button has not been reported held for ~0.2 s.
+    -- Safety net: the Mouse API has no button state and ONHOLD only fires
+    -- while the pointer is over the handle, so a fast drag used to "lose" the
+    -- handle and stop after 0.2 s. Now any pointer movement also keeps the
+    -- drag alive (capture for the whole drag); it ends on ONRELEASE, or after
+    -- ~0.5 s with neither hold nor movement.
+    if drag.pmx ~= nil and (math.abs(mx - drag.pmx) > 0.5 or math.abs(my - drag.pmy) > 0.5) then drag.idle = 0 end
+    drag.pmx, drag.pmy = mx, my
     drag.idle = drag.idle + 1
-    if drag.idle > 10 then
+    if drag.idle > 25 then
         local d = drag
         drag = nil
         helpers.clampAll()
@@ -469,7 +490,7 @@ local function applyCollapsed()
         win.box.hidden = closed or win.state.collapsed == true
         win.icon.hidden = closed or win.state.collapsed ~= true
         if win.state.collapsed then win.icon:MoveToFront() else win.box:MoveToFront() end
-        if helpers.afterRaise then pcall(helpers.afterRaise) end
+        if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
     end)
 end
 
@@ -1003,12 +1024,14 @@ local function ensureHover()
         hoverText:SetPos(5, 0)
         hoverText:SetSize(-10, 0, 1.0, 1.0)
         hoverText.font = helpers.FONT
-        hoverText:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.CENTRE)
+        hoverText:AlignTo(ui.AlignMode.TOPLEFT, ui.AlignMode.TOPLEFT)
         pcall(function() hoverText.clickthrough = true end)
         helpers.shadow(hoverText)
         hoverBox.hidden = true
     end)
 end
+helpers.TIP_WRAP = 260     -- fixed tooltip wrap width (px)
+helpers.TIP_LINE_H = 16    -- tooltip line height (px)
 local hov = { cand = nil, candN = 0, miss = 0, mx = nil, my = nil, shown = false }
 local function hideHover()
     hoverFor = nil; hov.shown = false; hov.cand = nil; hov.candN = 0
@@ -1043,7 +1066,7 @@ function helpers.raiseWindow()
         if win.state ~= nil and win.state.collapsed and win.icon ~= nil then win.icon:MoveToFront()
         elseif win.box ~= nil then win.box:MoveToFront() end
     end)
-    if helpers.afterRaise then pcall(helpers.afterRaise) end
+    if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
 end
 function helpers.raiseOnClick(c)
     if c == nil then return end
@@ -1106,6 +1129,12 @@ function helpers.tickHover()
     if mx == nil then hideHover(); hov.shown = false; return end
     local sc = uiScale()
     mx, my = mx / sc, my / sc
+    -- frame cost: with the pointer still and the owner settled, skip the
+    -- hit-test scan (it walks every registered tip); re-check every 8th call
+    -- so live (function) tips still update about 1.5 times a second.
+    hov.still = (hov.lmx ~= nil and math.abs(mx - hov.lmx) < 1 and math.abs(my - hov.lmy) < 1) and (hov.still or 0) + 1 or 0
+    hov.lmx, hov.lmy = mx, my
+    if hov.still > 0 and hov.still % 8 ~= 0 and (hov.candN >= 2 or (hov.cand == nil and hov.miss >= 2)) then return end
     local best, bestA, bestN = nil, nil, -1
     local function consider(c, kind, e)
         local a = areaOf(c); local n = helpers.tipOrder[c] or 0
@@ -1159,26 +1188,48 @@ function helpers.tickHover()
                 plain = tipText:gsub("<[^>]*>", "")
                 if found ~= nil and full ~= "" and full ~= plain then plain = full .. " | " .. plain end
             end
+            -- Measure ONCE per text change: wrap at a fixed width chosen up
+            -- front (TIP_WRAP), so long text grows taller, never wider. Words
+            -- longer than the wrap are hard-split. Size = widest line + pad,
+            -- lines * line height + pad. The text component gets the same
+            -- fixed size (no relative sizing), so the engine never re-wraps
+            -- or overflows it and nothing flips between frames.
+            local WRAP, LH, PADX, PADY = helpers.TIP_WRAP, helpers.TIP_LINE_H, 10, 6
+            local function tw(str)
+                local w = textWidth(helpers.FONT, str)
+                if type(w) ~= "number" or w <= 0 then w = #str * 7 end   -- measurement unavailable: safe estimate
+                return w
+            end
             local lines, cur, maxW = {}, "", 0
             for word in plain:gmatch("%S+") do
+                while tw(word) > WRAP and #word > 1 do
+                    local cut = #word
+                    while cut > 1 and tw(word:sub(1, cut)) > WRAP do cut = cut - 1 end
+                    if cur ~= "" then table.insert(lines, cur); cur = "" end
+                    table.insert(lines, word:sub(1, cut)); word = word:sub(cut + 1)
+                end
                 local try = cur == "" and word or (cur .. " " .. word)
-                if cur ~= "" and textWidth(helpers.FONT, try) > 240 then
+                if cur ~= "" and tw(try) > WRAP then
                     table.insert(lines, cur); cur = word
                 else cur = try end
             end
             if cur ~= "" then table.insert(lines, cur) end
-            for _, l in ipairs(lines) do maxW = math.max(maxW, textWidth(helpers.FONT, l)) end
+            for _, l in ipairs(lines) do maxW = math.max(maxW, tw(l)) end
+            local bw = math.floor(math.min(maxW, WRAP)) + 2 * PADX + 2
+            local bh = LH * math.max(1, #lines) + 2 * PADY
             hoverText.font = helpers.FONT
             pcall(function() hoverText.maxLines = 0 end)
             hoverText.content = table.concat(lines, "<br>")
-            hoverBox:SetSize(math.floor(math.min(maxW, 240)) + 14, 6 + 16 * math.max(1, #lines))
+            hoverBox:SetSize(bw, bh)
+            pcall(function() hoverText:SetPos(PADX, PADY); hoverText:SetSize(bw - 2 * PADX, bh - 2 * PADY) end)
+            hov.bw, hov.bh = bw, bh   -- cached size; reused until the text changes
         end
         local moved = hov.mx == nil or math.abs(mx - hov.mx) > 2 or math.abs(my - hov.my) > 2
         if relaid or moved or not hov.shown then
             hov.mx, hov.my = mx, my
             local pw, ph = 99999, 99999
             pcall(function() pw = hoverBox.parent.width; ph = hoverBox.parent.height end)
-            local bw, bh, OFF = hoverBox.width, hoverBox.height, 16
+            local bw, bh, OFF = hov.bw or hoverBox.width, hov.bh or hoverBox.height, 16
             local x, y = mx + OFF, my + OFF
             if x + bw > pw - 2 then x = mx - bw - OFF end
             if y + bh > ph - 2 then y = my - bh - OFF end
@@ -1193,7 +1244,7 @@ function helpers.tickHover()
         if not hov.shown then
             hoverBox.hidden = false
             hoverBox:MoveToFront()
-            if helpers.afterRaise then pcall(helpers.afterRaise) end
+            if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
             hov.shown = true
         end
     end)
@@ -1503,7 +1554,7 @@ function helpers.winBox() return win.box end
 function helpers.winIcon() return win.icon end
 function helpers.raiseFront()
     pcall(function() if win.state ~= nil and win.state.collapsed and win.icon ~= nil then win.icon:MoveToFront() elseif win.box ~= nil then win.box:MoveToFront() end end)
-    if helpers.afterRaise then pcall(helpers.afterRaise) end
+    if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
 end
 function helpers.isCollapsed() return win.state ~= nil and win.state.collapsed == true end
 
@@ -1684,6 +1735,24 @@ function helpers.commas(n) local s = string.format("%d", math.floor(tonumber(n) 
 ]]
 helpers.DROPDOWN_ROWS = 8
 local ddOpen = nil
+-- 0.1.8 dropdown fix: the opening click is ignored by the list for a short
+-- guard time, the box toggles at most once per guard time (no down+up
+-- double toggle), and the list is re-raised after any window raise.
+local ddGuardUntil = 0
+local DD_GUARD = 0.30
+local ddTick = 0   -- fallback clock (Logic ticks) if os.clock is unavailable
+local function ddNow()
+    local ok, t = pcall(function() return os.clock() end)
+    if ok and type(t) == "number" then return t end
+    return ddTick * 0.02   -- Logic runs at 50 ticks/s
+end
+-- 0.1.8: sandbox-safe clock for every plugin (os.clock, else Logic ticks).
+helpers.clock = ddNow
+function helpers.ddFront()
+    local d = ddOpen
+    if d == nil or d.listParts == nil then return end
+    for _, c in ipairs(d.listParts) do pcall(function() c:MoveToFront() end) end
+end
 local DD_STONE = Vector4.new(0.17, 0.15, 0.12, 1.0)
 local DD_EDGE  = Vector4.new(150/255, 126/255, 62/255, 1.0)
 local DD_HOVER = Vector4.new(0.42, 0.33, 0.14, 1.0)
@@ -1727,8 +1796,10 @@ function helpers.dropdown(parent, x, y, w, h, opt)
     helpers.blockClicks(o.box)
     pcall(function()
         o.box:Subscribe(ui.Hook.ONCLICK, "dd_" .. tostring(opt.name or ""), function()
-            pcall(helpers.raiseWindow)
-            if ddOpen == o then helpers.closeDropdown() else o:open() end
+            if ddNow() < ddGuardUntil then return end   -- same click / bounce
+            if ddOpen == o then helpers.closeDropdown(); ddGuardUntil = ddNow() + DD_GUARD; return end
+            pcall(helpers.raiseWindow)   -- raise the panel BEFORE building the list
+            o:open()
         end)
     end)
     if opt.tip then helpers.setTip(o.box, opt.tip) end
@@ -1740,7 +1811,8 @@ function helpers.dropdown(parent, x, y, w, h, opt)
         helpers.setText(self.text, helpers.val(fit))
     end
     function o:SetPos(nx, ny, px, py)
-        local moved = nx ~= self.x or ny ~= self.y or (px or 0) ~= self.px or (py or 0) ~= self.py
+        local function far(a, b) return math.abs((tonumber(a) or 0) - (tonumber(b) or 0)) > 1 end
+        local moved = self.x ~= nil and (far(nx, self.x) or far(ny, self.y) or (px or 0) ~= self.px or (py or 0) ~= self.py)
         self.x, self.y, self.px, self.py = nx, ny, px or 0, py or 0
         local P, Q = self.px, self.py
         helpers.safe(function()
@@ -1786,6 +1858,7 @@ function helpers.dropdown(parent, x, y, w, h, opt)
         local cur = self.opt.get() or 1
         if n > vis then self.scroll = math.max(0, math.min(n - vis, cur - math.ceil(vis / 2))) else self.scroll = 0 end
         ddOpen = self
+        ddGuardUntil = ddNow() + DD_GUARD
         self.listParts, self.rows = {}, {}
         local function keep(c) if c ~= nil then table.insert(self.listParts, c) end; return c end
         -- full-screen catcher: a click anywhere outside the list closes it
@@ -1793,7 +1866,10 @@ function helpers.dropdown(parent, x, y, w, h, opt)
             local cat = keep(ui.Text.new(top))
             cat:SetPos(0, 0); cat:SetSize(0, 0, 1.0, 1.0); cat.content = ""
             helpers.blockClicks(cat)
-            cat:Subscribe(ui.Hook.ONCLICK, "ddOut", function() helpers.closeDropdown() end)
+            cat:Subscribe(ui.Hook.ONCLICK, "ddOut", function()
+                if ddNow() < ddGuardUntil then return end   -- the click that opened it
+                helpers.closeDropdown(); ddGuardUntil = ddNow() + DD_GUARD
+            end)
         end)
         local bg = keep(ddRect(top, DD_STONE, true))
         local edge = keep(ddRect(top, DD_EDGE, false))
@@ -1815,6 +1891,7 @@ function helpers.dropdown(parent, x, y, w, h, opt)
             helpers.blockClicks(row.t)
             pcall(function()
                 row.t:Subscribe(ui.Hook.ONCLICK, "ddPick", function()
+                    if ddNow() < ddGuardUntil then return end
                     local i = self.scroll + r
                     if i >= 1 and i <= #ddOptions(self) then self:pick(i) end
                 end)
@@ -1831,6 +1908,7 @@ function helpers.dropdown(parent, x, y, w, h, opt)
             mk("v", ly + listH - 20, vis)
         end
         self:fill()
+        helpers.ddFront()
     end
     function o:fill()
         if self.rows == nil then return end
@@ -1858,6 +1936,7 @@ function helpers.dropdown(parent, x, y, w, h, opt)
 end
 -- Hover highlight for the open list (and close it if its box went away).
 helpers.subscribe("ui_helpers", "Logic", "uiDropdown", function()
+    ddTick = ddTick + 1
     local d = ddOpen
     if d == nil or d.rows == nil then return end
     local hid = false
