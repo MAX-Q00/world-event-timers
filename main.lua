@@ -14,7 +14,7 @@
 
 local PLUGIN_NAME = "World Event Timers"
 local helpers   = require("ui_helpers")
-helpers.VERSION = "0.12.13"
+helpers.VERSION = "0.12.14"
 local varClockTicks = 0
 local clock     = require("clock")
 local schedules = require("schedules")
@@ -450,6 +450,12 @@ openEditor = function(slot)
     if layout then layout() end
 end
 local function closeEditor() ed.open = false; if layout then layout() end end
+-- 0.12.14: X in the title bar closes the timer editor or Edit/settings first.
+helpers.onCloseSub = function()
+    if ed.open then closeEditor(); return true end
+    if helpers.closeEditIfOpen() then return true end
+    return false
+end
 function buildEditor(root)
     addBtn = helpers.button(root, 0, 0, 74, 18, "Add timer", function()
         if ed.open then closeEditor(); return end
