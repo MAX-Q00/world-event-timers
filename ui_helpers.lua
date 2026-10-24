@@ -970,7 +970,13 @@ end
 local hoverBox, hoverText, hoverFor = nil, nil, nil
 helpers.tips = setmetatable({}, { __mode = "k" })   -- component -> string | function
 --- Register an explanation tooltip (string or function returning a string).
-function helpers.setTip(c, t) if c ~= nil then helpers.tips[c] = t end end
+helpers.tipOrder = setmetatable({}, { __mode = "k" })   -- component -> registration order
+local tipSeq = 0
+function helpers.setTip(c, t)
+    if c == nil then return end
+    if helpers.tipOrder[c] == nil then tipSeq = tipSeq + 1; helpers.tipOrder[c] = tipSeq end
+    helpers.tips[c] = t
+end
 local function ensureHover()
     if hoverBox ~= nil then return true end
     return pcall(function()
@@ -1003,8 +1009,9 @@ local function ensureHover()
         hoverBox.hidden = true
     end)
 end
+local hov = { cand = nil, candN = 0, miss = 0, mx = nil, my = nil, shown = false }
 local function hideHover()
-    hoverFor = nil
+    hoverFor = nil; hov.shown = false; hov.cand = nil; hov.candN = 0
     if hoverBox ~= nil then pcall(function() hoverBox.hidden = true end) end
 end
 helpers.ensureHoverLayer = function() local ok, top = pcall(function() return ui.Interfaces:GetComponent(id.Component.TOPLEVEL_V2__PLUGIN_BUILD_LAYER_TOP) end); return ok and top or nil end
@@ -1082,55 +1089,75 @@ function helpers.isOver(c, mx, my)
     return vis and isOver(c, mx, my)
 end
 
+-- 0.1.8 hover rules (fixes flicker): ONE owner per check. Every hit is
+-- collected and the innermost (smallest area) wins; ties go to the most
+-- recently registered tip, so a control beats the row it sits on. A new owner
+-- must hold for 2 checks before it shows (show delay / hysteresis) and the box
+-- hides only after 2 empty checks. The box is re-laid out only when its text
+-- changes, moved only when the pointer moves > 2px, never sits under the
+-- pointer, is clamped on screen, and is click-through / disabled (no hover).
+local function areaOf(c)
+    local w, h = 1e9, 1e9
+    pcall(function() w = c.width; h = c.height end)
+    return (tonumber(w) or 1e9) * (tonumber(h) or 1e9)
+end
 function helpers.tickHover()
     local mx, my = mousePos()
-    if mx == nil then hideHover(); return end
+    if mx == nil then hideHover(); hov.shown = false; return end
     local sc = uiScale()
     mx, my = mx / sc, my / sc
-    local found, tipC = nil, nil
+    local best, bestA, bestN = nil, nil, -1
+    local function consider(c, kind, e)
+        local a = areaOf(c); local n = helpers.tipOrder[c] or 0
+        if best == nil or a < bestA or (a == bestA and n > bestN) then best, bestA, bestN = { c = c, kind = kind, e = e }, a, n end
+    end
     for _, e in ipairs(fitted) do
         if e.truncated then
             local vis = true
             pcall(function() vis = e.c.visibleGlobal ~= false and not e.c.hidden end)
-            if vis and isOver(e.c, mx, my) then found = e; break end
+            if vis and isOver(e.c, mx, my) then consider(e.c, "fit", e) end
         end
     end
-    -- 0.2.1 (RS Dev Tools): explanation tooltips share this box. A component
-    -- registered with helpers.setTip shows its tip (and the full text when it
-    -- is also truncated).
-    local tipText = nil
     for c, t in pairs(helpers.tips) do
-        if helpers.isOver(c, mx, my) then
+        if c ~= hoverBox and helpers.isOver(c, mx, my) then consider(c, "tip") end
+    end
+    local tipText, found = nil, nil
+    if best ~= nil then
+        local t = helpers.tips[best.c]
+        if t ~= nil then
             local ok, v = pcall(function() if type(t) == "function" then return t() end return t end)
-            if ok and type(v) == "string" and v ~= "" then tipC, tipText = c, v; break end
+            if ok and type(v) == "string" and v ~= "" then tipText = v end
         end
+        for _, e in ipairs(fitted) do if e.c == best.c and e.truncated then found = e; break end end
+        if found == nil and tipText == nil then best = nil end
     end
-    -- Optional extension: helpers.worldHover() returns hover text for the game
-    -- world (RS Dev Tools item hover) when no panel tip applies. Nil = off.
-    if found == nil and tipC == nil and helpers.worldHover ~= nil then
+    if best == nil and helpers.worldHover ~= nil then
         local okW, w = pcall(helpers.worldHover)
-        if okW and type(w) == "string" and w ~= "" then tipC, tipText = true, w end
+        if okW and type(w) == "string" and w ~= "" then best = { c = "world" }; tipText = w end
     end
-    if found == nil and tipC == nil then hideHover(); return end
-    if found ~= nil and tipC ~= nil and found.c ~= tipC then
-        -- prefer the innermost / truncated one
-        tipC, tipText = nil, nil
+    if best == nil then
+        hov.cand, hov.candN = nil, 0
+        hov.miss = hov.miss + 1
+        if hov.miss >= 2 or not hov.shown then hideHover(); hov.shown = false end
+        return
     end
+    hov.miss = 0
+    if hov.cand ~= best.c then hov.cand, hov.candN = best.c, 1 else hov.candN = hov.candN + 1 end
+    if hov.candN < 2 then return end   -- show delay: same owner for 2 checks
     if not ensureHover() then return end
-    local key = (found and tostring(found.c) or "") .. "|" .. tostring(tipText)
+    local key = tostring(best.c) .. "|" .. (found and tostring(helpers.fullText[found.c] or found.full or "") or "") .. "|" .. tostring(tipText)
     pcall(function()
+        local relaid = false
         if hoverFor ~= key then
-            hoverFor = key
+            hoverFor = key; relaid = true
             -- Full string from helpers.fullText (never the component's
-            -- current, shortened text). Word-wrapped here at 240 px with
-            -- <br> so the engine never has to shorten it; the hover text is
-            -- not tracked, so fitText never touches it.
+            -- current, shortened text), word-wrapped at 240 px with <br>.
             local plain = ""
             if found ~= nil then plain = tostring(helpers.fullText[found.c] or found.full or ""):gsub("<[^>]*>", "") end
             if tipText ~= nil then
                 local full = plain
                 plain = tipText:gsub("<[^>]*>", "")
-                if found ~= nil and full ~= "" then plain = full .. " | " .. plain end
+                if found ~= nil and full ~= "" and full ~= plain then plain = full .. " | " .. plain end
             end
             local lines, cur, maxW = {}, "", 0
             for word in plain:gmatch("%S+") do
@@ -1146,20 +1173,32 @@ function helpers.tickHover()
             hoverText.content = table.concat(lines, "<br>")
             hoverBox:SetSize(math.floor(math.min(maxW, 240)) + 14, 6 + 16 * math.max(1, #lines))
         end
-        local pw, ph = 99999, 99999
-        pcall(function() pw = hoverBox.parent.width; ph = hoverBox.parent.height end)
-        -- right of and below the pointer; flip left / above at the window edges
-        local x, y = mx + 12, my + 12   -- 12px below-right of the pointer
-        if x + hoverBox.width > pw - 2 then x = mx - hoverBox.width - 12 end
-        if y + hoverBox.height > ph - 2 then y = my - hoverBox.height - 12 end
-        x = math.max(2, math.min(x, pw - hoverBox.width - 2))
-        y = math.max(2, math.min(y, ph - hoverBox.height - 2))
-        hoverBox:SetPos(math.floor(x), math.floor(y))
-        hoverBox.hidden = false
-        hoverBox:MoveToFront()
-        if helpers.afterRaise then pcall(helpers.afterRaise) end
+        local moved = hov.mx == nil or math.abs(mx - hov.mx) > 2 or math.abs(my - hov.my) > 2
+        if relaid or moved or not hov.shown then
+            hov.mx, hov.my = mx, my
+            local pw, ph = 99999, 99999
+            pcall(function() pw = hoverBox.parent.width; ph = hoverBox.parent.height end)
+            local bw, bh, OFF = hoverBox.width, hoverBox.height, 16
+            local x, y = mx + OFF, my + OFF
+            if x + bw > pw - 2 then x = mx - bw - OFF end
+            if y + bh > ph - 2 then y = my - bh - OFF end
+            x = math.max(2, math.min(x, pw - bw - 2))
+            y = math.max(2, math.min(y, ph - bh - 2))
+            -- never under the pointer (the clamp could push it back there)
+            if mx >= x and mx <= x + bw and my >= y and my <= y + bh then
+                if my - bh - OFF >= 2 then y = my - bh - OFF else y = math.min(my + OFF, ph - bh - 2) end
+            end
+            hoverBox:SetPos(math.floor(x), math.floor(y))
+        end
+        if not hov.shown then
+            hoverBox.hidden = false
+            hoverBox:MoveToFront()
+            if helpers.afterRaise then pcall(helpers.afterRaise) end
+            hov.shown = true
+        end
     end)
 end
+
 function helpers.destroyHover()
     if hoverBox ~= nil then pcall(function() hoverBox:Destroy() end) end
     hoverBox, hoverText, hoverFor = nil, nil, nil
