@@ -1048,6 +1048,26 @@ function helpers.refit()
     for _, e in ipairs(fitted) do if not e.manual then fitEntry(e) end end
 end
 
+--- Forget destroyed components (2026-10-24 leak fix): drops them from the
+-- font list (helpers.texts), the fit list and the tip table, so lists that
+-- grew on every dropdown open no longer grow, and the hover poll stays cheap.
+function helpers.forget(list)
+    if list == nil or #list == 0 then return end
+    local gone = {}
+    for _, c in ipairs(list) do if c ~= nil then gone[c] = true end end
+    local function compact(arr, key)
+        local j = 0
+        for i = 1, #arr do
+            local v = arr[i]
+            local c = key and v[key] or v
+            if not gone[c] then j = j + 1; arr[j] = v end
+        end
+        for i = #arr, j + 1, -1 do arr[i] = nil end
+    end
+    compact(helpers.texts)
+    compact(fitted, "c")
+    for c in pairs(gone) do fitOf[c] = nil; helpers.tips[c] = nil end
+end
 --[[
   Full-text hover box for truncated text (0.10.3).
   Polls Mouse.GetPosition() and each truncated component's documented
@@ -1859,6 +1879,7 @@ function helpers.closeDropdown()
     if d == nil then return end
     ddOpen = nil
     for _, c in ipairs(d.listParts or {}) do pcall(function() c:Destroy() end) end
+    pcall(helpers.forget, d.listParts)
     d.listParts, d.rows = nil, nil
 end
 function helpers.dropdown(parent, x, y, w, h, opt)
@@ -1917,7 +1938,7 @@ function helpers.dropdown(parent, x, y, w, h, opt)
     end
     function o:parts() local t = { self.bg, self.edge, self.text, self.box }; for _, r in ipairs(self.arrow) do t[#t + 1] = r end; return t end
     function o:close() if ddOpen == self then helpers.closeDropdown() end end
-    function o:destroy() self:close(); for _, c in ipairs(self:parts()) do pcall(function() c:Destroy() end) end end
+    function o:destroy() self:close(); local ps = self:parts(); for _, c in ipairs(ps) do pcall(function() c:Destroy() end) end; pcall(helpers.forget, ps) end
     function o:pick(i)
         helpers.closeDropdown()
         if i ~= self.opt.get() then
