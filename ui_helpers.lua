@@ -348,10 +348,19 @@ end
   window is not available yet. Callers retry until it succeeds.
 ]]
 helpers.TITLE_HEIGHT = 24
-local ICON_SIZE = 44
+local ICON_SIZE = 60   -- 2026-10-24: minimized icon 60px (was 44) + name strip
+local ICON_LABEL_H = 16
 local STATE_KEY = "windowState"
 
 local win = { box = nil, icon = nil, content = nil, state = nil, name = "" }
+-- 2026-10-24: every raise path ends here. The plugin's afterRaise hook, then
+-- the minimized icon (always above this plugin's panel and model boxes),
+-- then an open dropdown list on top of everything.
+function helpers.postRaise()
+    if helpers.afterRaise then pcall(helpers.afterRaise) end
+    pcall(function() if win.icon ~= nil and win.state ~= nil and win.state.collapsed and not win.icon.hidden then win.icon:MoveToFront() end end)
+    if helpers.ddFront then pcall(helpers.ddFront) end
+end
 local drag = nil       -- active drag: {target, mx, my, ox, oy, moved, idle, onEnd}
 local dragTick = 0
 
@@ -389,7 +398,7 @@ local function makeDraggable(handle, target, onEnd, resize)
                  ow = target.width, oh = target.height, resize = resize,
                  moved = false, idle = 0, onEnd = onEnd }
         pcall(function() target:MoveToFront() end)
-        if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
+        helpers.postRaise()
     end)
     handle:Subscribe(ui.Hook.ONHOLD, "dragHold", function()
         if drag ~= nil then drag.idle = 0 end
@@ -490,7 +499,7 @@ local function applyCollapsed()
         win.box.hidden = closed or win.state.collapsed == true
         win.icon.hidden = closed or win.state.collapsed ~= true
         if win.state.collapsed then win.icon:MoveToFront() else win.box:MoveToFront() end
-        if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
+        helpers.postRaise()
     end)
 end
 
@@ -498,6 +507,84 @@ local function initials(name)
     local out = ""
     for w in string.gmatch(name, "%a+") do out = out .. string.sub(w, 1, 1) end
     return out
+end
+
+-- 2026-10-24 hardening: saved numbers must be finite and sane, else dropped
+-- (the default is used); positions are then clamped on screen by clampAll.
+function helpers.sanitizeState(st)
+    local function fin(v) return type(v) == "number" and v == v and v > -1e6 and v < 1e6 end
+    for _, k in ipairs({ "x", "y", "ix", "iy" }) do
+        if not fin(st[k]) or st[k] < 0 or st[k] > 8000 then st[k] = nil else st[k] = math.floor(st[k]) end
+    end
+    for _, k in ipairs({ "w", "h" }) do
+        if not fin(st[k]) or st[k] < 60 or st[k] > 4000 then st[k] = nil else st[k] = math.floor(st[k]) end
+    end
+    if (st.x == nil) ~= (st.y == nil) then st.x, st.y = nil, nil end
+    if (st.ix == nil) ~= (st.iy == nil) then st.ix, st.iy = nil, nil end
+end
+-- Distinct default icon slot per plugin (plugins cannot read each other's
+-- saved state, so the slot is fixed by name): a column of 5 at the right
+-- edge, then a second column. Unknown names get a slot from a name hash.
+helpers.ICON_SLOTS = { ["RS Dev Tools"] = 0, ["Pinger"] = 1, ["Idle NPCs"] = 2, ["Rotten Potato"] = 3, ["Sound Browser"] = 4,
+    ["World Event Timers"] = 5, ["Slayer Task Tracker"] = 6, ["Cursor Sprite"] = 7, ["Gear Preset Checker"] = 8 }
+function helpers.iconDefault(name)
+    local slot = helpers.ICON_SLOTS[name]
+    if slot == nil then slot = 0; for i = 1, #name do slot = (slot * 31 + string.byte(name, i)) % 10 end; slot = 9 + slot end
+    local sw = 1600
+    pcall(function() if win.root ~= nil and win.root.width > 200 then sw = win.root.width end end)
+    local col, row = math.floor(slot / 5), slot % 5
+    return math.max(0, sw - (col + 1) * 72 - 8), 110 + row * 88
+end
+function helpers.buildIcon(parent, name)
+    local W, Hh = 64, 64 + ICON_LABEL_H
+    local holder = ui.GroupBox.new(parent)
+    pcall(function() holder.stylesheetID = id.StyleSheet.DEFAULT end)
+    pcall(function() holder:SetHeaderLayout(0, 0, 0, 0, 0) end)
+    pcall(function() holder.colour = Vector4.new(0, 0, 0, 0) end)
+    holder:SetSize(W, Hh)
+    local function rect(x, y, w, h, r, g, b, a, filled)
+        pcall(function()
+            local rc = ui.Rectangle.new(holder)
+            rc:SetPos(x, y); rc:SetSize(w, h)
+            rc.colour = Vector4.new(r, g, b, a); rc.fill = filled
+            if not filled then rc.outlineThickness = -1 end
+            pcall(function() rc.clickthrough = true end)
+        end)
+    end
+    rect(0, 0, W, 64, 0.05, 0.04, 0.03, 0.95, true)
+    pcall(function()
+        local res = Plugin.resources.icon
+        res:Load()
+        local sp = ui.Sprite.new(holder)
+        sp:SetPos(2 + (W - 4 - ICON_SIZE) / 2, 2 + (60 - ICON_SIZE) / 2)
+        sp:SetSize(ICON_SIZE, ICON_SIZE)
+        sp.sprite = res
+        pcall(function() sp.clickthrough = true end)
+    end)
+    rect(0, 0, W, 64, 0, 0, 0, 1, false)
+    rect(1, 1, W - 2, 62, 1.0, 0.80, 0.20, 1, false)
+    rect(2, 2, W - 4, 60, 1.0, 0.80, 0.20, 1, false)
+    rect(0, 64, W, ICON_LABEL_H, 0.02, 0.02, 0.02, 0.95, true)
+    pcall(function()
+        local t = ui.Text.new(holder)
+        t:SetPos(0, 64); t:SetSize(W, ICON_LABEL_H)
+        t.font = helpers.FONT
+        t.content = helpers.col(helpers.C_GOLD, helpers.SHORT_TITLES[name] or initials(name))
+        t:AlignTo(ui.AlignMode.CENTRE, ui.AlignMode.CENTRE)
+        helpers.shadow(t)
+        pcall(function() t.clickthrough = true end)
+    end)
+    win.iconHit = nil
+    pcall(function()
+        local hit = ui.Text.new(holder)
+        hit:SetPos(0, 0); hit:SetSize(W, Hh)
+        hit.content = ""
+        helpers.blockClicks(hit)
+        hit:MoveToFront()
+        win.iconHit = hit
+        helpers.setTip(hit, name .. " (click to open, drag to move)")
+    end)
+    return holder
 end
 
 function helpers.createWindow(name, width, height, xPct, yPct)
@@ -510,7 +597,14 @@ function helpers.createWindow(name, width, height, xPct, yPct)
         -- Always open on load/reload: a saved "closed" (X pressed) used to keep
         -- the panel hidden forever after a reload, so the plugin looked broken.
         win.state.closed = nil
-        if win.state.collapsed == true and win.state.ix == nil then win.state.collapsed = nil end
+        -- 2026-10-24 (Pinger "won't open"): also open un-minimized on every
+        -- load. A saved collapsed=true kept the panel as an icon that another
+        -- plugin's icon could cover, so the plugin looked like it never opened.
+        win.state.collapsed = nil
+        helpers.sanitizeState(win.state)
+        -- one-time: move every saved icon to this plugin's own slot (all nine
+        -- had piled up around x 1630-1850, y 180-250 and covered each other)
+        if win.state.iconSlot ~= 1 then win.state.ix, win.state.iy, win.state.iconSlot = nil, nil, 1; saveWinState() end
         -- 0.7.0 auto-sizes panels: drop sizes saved by older layouts once.
         if win.state.layout ~= 7 then
             win.state.w, win.state.h, win.state.layout = nil, nil, 7
@@ -663,28 +757,16 @@ function helpers.createWindow(name, width, height, xPct, yPct)
         closeBtn:SetPos(helpers.titleBtnX(), 3)
         win.closeBtn = closeBtn
 
-        -- Collapsed icon: the plugin's resources/icon.png drawn with a
-        -- ui.Sprite (falls back to a text button). Draggable; a click
-        -- without movement restores the window.
-        local icon = nil
-        local okIcon = pcall(function()
-            local res = Plugin.resources.icon
-            if res == nil then error("no resources/icon.png") end
-            res:Load()
-            icon = ui.Sprite.new(game_window)
-            icon:SetSize(ICON_SIZE, ICON_SIZE)
-            icon.sprite = res
-        end)
-        if not okIcon or icon == nil then
-            icon = ui.Button.new(game_window)
-            icon.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
-            icon:SetSize(ICON_SIZE, ICON_SIZE)
-            icon.label = helpers.SHORT_TITLES[name] or initials(name)
-        end
+        -- Collapsed icon (2026-10-24): a 64 x 80 holder with a dark tile, the
+        -- plugin's resources/icon.png at 52px, a 2px bright-gold outline, the
+        -- short name in a strip underneath, and a full-name tooltip. A
+        -- transparent Text over all of it is the drag / click hit area (a
+        -- click without movement restores the window).
+        local icon = helpers.buildIcon(game_window, name)
         helpers.blockClicks(icon)   -- restore-click must not reach the game world
         if win.state.ix ~= nil then icon:SetPos(win.state.ix, win.state.iy)
-        else icon:SetPos(0, 0, xPct, yPct) end
-        makeDraggable(icon, icon, function(moved)
+        else local dx, dy = helpers.iconDefault(name); icon:SetPos(dx, dy) end
+        makeDraggable(win.iconHit or icon, icon, function(moved)
             if moved then
                 win.state.ix, win.state.iy = icon.x, icon.y
             else
@@ -859,7 +941,7 @@ function helpers.titleRight()
     return helpers.PAD + 44 + (win.hasEdit and ((win.editW or 34) + 4) or 0) + 4
 end
 -- Short titles used only when the full title does not fit.
-helpers.SHORT_TITLES = { ["Gear Preset Checker"] = "Presets", ["World Event Timers"] = "Timers", ["Slayer Task Tracker"] = "Tasks", ["Cursor Sprite"] = "Cursor", ["RS Dev Tools"] = "Dev", ["Sound Browser"] = "Sounds", ["Rotten Potato"] = "RP" }
+helpers.SHORT_TITLES = { ["Gear Preset Checker"] = "Presets", ["World Event Timers"] = "Timers", ["Slayer Task Tracker"] = "Tasks", ["Cursor Sprite"] = "Cursor", ["RS Dev Tools"] = "Dev", ["Sound Browser"] = "Sounds", ["Rotten Potato"] = "RP", ["Pinger"] = "Ping", ["Idle NPCs"] = "NPCs" }
 
 --[[
   Ellipsis fitting (0.10.2). helpers.fitText shortens a string (colour tags
@@ -1066,7 +1148,7 @@ function helpers.raiseWindow()
         if win.state ~= nil and win.state.collapsed and win.icon ~= nil then win.icon:MoveToFront()
         elseif win.box ~= nil then win.box:MoveToFront() end
     end)
-    if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
+    helpers.postRaise()
 end
 function helpers.raiseOnClick(c)
     if c == nil then return end
@@ -1244,7 +1326,8 @@ function helpers.tickHover()
         if not hov.shown then
             hoverBox.hidden = false
             hoverBox:MoveToFront()
-            if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
+            helpers.postRaise()
+            hoverBox:MoveToFront()
             hov.shown = true
         end
     end)
@@ -1554,7 +1637,7 @@ function helpers.winBox() return win.box end
 function helpers.winIcon() return win.icon end
 function helpers.raiseFront()
     pcall(function() if win.state ~= nil and win.state.collapsed and win.icon ~= nil then win.icon:MoveToFront() elseif win.box ~= nil then win.box:MoveToFront() end end)
-    if helpers.afterRaise then pcall(helpers.afterRaise) end; if helpers.ddFront then pcall(helpers.ddFront) end
+    helpers.postRaise()
 end
 function helpers.isCollapsed() return win.state ~= nil and win.state.collapsed == true end
 
@@ -1563,7 +1646,7 @@ function helpers.resetWindow()
     win.state = {}
     saveWinState()
     pcall(function() win.box:SetPos(40, 120) end)
-    pcall(function() win.icon:SetPos(40, 120) end)
+    pcall(function() local dx, dy = helpers.iconDefault(win.name); win.icon:SetPos(dx, dy) end)
     applyCollapsed()
     helpers.clampAll()
 end
@@ -1645,6 +1728,19 @@ end)
 -- Window drag runs on the 50 Hz logic tick.
 helpers.subscribe("ui_helpers", "Logic", "uiDrag", tickDrag)
 helpers.subscribe("ui_helpers", "Logic", "uiRaiseVisit", function() pcall(helpers.tickRaiseVisit) end)
+-- 2026-10-24: other plugins cannot raise this icon, and their panels / model
+-- boxes can be raised over it, so while minimized the icon re-raises itself
+-- twice a second (one MoveToFront; nothing at all while the panel is open).
+local iconTicks = 0
+helpers.subscribe("ui_helpers", "Logic", "uiIconTop", function()
+    if win.icon == nil or win.state == nil or not win.state.collapsed or drag ~= nil then return end
+    iconTicks = iconTicks + 1
+    if iconTicks < 25 then return end
+    iconTicks = 0
+    pcall(function() if not win.icon.hidden then win.icon:MoveToFront() end end)
+    pcall(function() if hov.shown and hoverBox ~= nil then hoverBox:MoveToFront() end end)
+    if helpers.ddFront then pcall(helpers.ddFront) end
+end)
 local hoverTicks = 0
 helpers.subscribe("ui_helpers", "Logic", "uiHover", function()
     hoverTicks = hoverTicks + 1
